@@ -6,7 +6,7 @@ import threading
 import time
 import tkinter as tk
 from dataclasses import dataclass
-from tkinter import messagebox, ttk
+from tkinter import messagebox, scrolledtext, ttk
 
 import speech_recognition as sr
 from googletrans import Translator
@@ -25,8 +25,9 @@ class SpeechTranslatorApp:
 
         # UI components
         self.status_var = tk.StringVar(value="待機中")
-        self.source_text = tk.StringVar(value="")
-        self.translation_text = tk.StringVar(value="")
+
+        self.source_log: list[str] = []
+        self.translation_log: list[str] = []
 
         self._build_ui()
 
@@ -34,6 +35,20 @@ class SpeechTranslatorApp:
         self.recognizer = sr.Recognizer()
         self.microphone = sr.Microphone()
         self.translator = Translator()
+
+        # Fine-tune recognizer for better accuracy
+        self.recognizer.dynamic_energy_threshold = True
+        self.recognizer.energy_threshold = 300
+        self.recognizer.pause_threshold = 0.6
+        self.recognizer.non_speaking_duration = 0.3
+
+        # Try multiple accent-specific language codes when recognizing speech
+        self.recognition_languages = [
+            "en-US",
+            "en-GB",
+            "en-IN",
+            "en-AU",
+        ]
 
         # Threading
         self._queue: "queue.Queue[Transcript | Exception]" = queue.Queue()
@@ -60,11 +75,23 @@ class SpeechTranslatorApp:
 
         source_frame = ttk.Labelframe(self.root, text="英語の認識結果")
         source_frame.pack(fill=tk.BOTH, expand=True, **padding)
-        ttk.Label(source_frame, textvariable=self.source_text, wraplength=480, justify=tk.LEFT).pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.source_text_widget = scrolledtext.ScrolledText(
+            source_frame,
+            wrap=tk.WORD,
+            height=10,
+            state=tk.DISABLED,
+        )
+        self.source_text_widget.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         translation_frame = ttk.Labelframe(self.root, text="日本語訳")
         translation_frame.pack(fill=tk.BOTH, expand=True, **padding)
-        ttk.Label(translation_frame, textvariable=self.translation_text, wraplength=480, justify=tk.LEFT).pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.translation_text_widget = scrolledtext.ScrolledText(
+            translation_frame,
+            wrap=tk.WORD,
+            height=10,
+            state=tk.DISABLED,
+        )
+        self.translation_text_widget.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
     def start_listening(self) -> None:
         if self._running:
@@ -96,8 +123,8 @@ class SpeechTranslatorApp:
         while self._running:
             try:
                 with self.microphone as source:
-                    audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=5)
-                text = self.recognizer.recognize_google(audio, language="en-US")
+                    audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=6)
+                text = self._recognize_with_accents(audio)
                 translation = self.translator.translate(text, src="en", dest="ja").text
                 self._queue.put(Transcript(source=text, translation=translation))
             except sr.WaitTimeoutError:
@@ -114,8 +141,7 @@ class SpeechTranslatorApp:
                     messagebox.showerror("エラー", str(item))
                     self.stop_listening()
                     break
-                self.source_text.set(item.source)
-                self.translation_text.set(item.translation)
+                self._append_transcript(item)
                 self.status_var.set("翻訳しました")
         except queue.Empty:
             pass
@@ -123,6 +149,52 @@ class SpeechTranslatorApp:
             if self._running:
                 self.status_var.set("リスニング中…")
             self.root.after(200, self._process_queue)
+
+    def _recognize_with_accents(self, audio: sr.AudioData) -> str:
+        """Try multiple English variants to better handle accented speech."""
+        last_error: Exception | None = None
+        for language_code in self.recognition_languages:
+            try:
+                result = self.recognizer.recognize_google(
+                    audio,
+                    language=language_code,
+                    show_all=True,
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                last_error = exc
+                continue
+
+            if isinstance(result, dict):
+                alternatives = result.get("alternative", [])
+                if alternatives:
+                    best_match = max(
+                        alternatives,
+                        key=lambda alt: alt.get("confidence", 0.0),
+                    )
+                    transcript = best_match.get("transcript")
+                    if transcript:
+                        return transcript
+            elif isinstance(result, str) and result:
+                return result
+
+        if last_error is not None:
+            raise last_error
+        raise sr.UnknownValueError("音声を認識できませんでした")
+
+    def _append_transcript(self, transcript: Transcript) -> None:
+        self.source_log.append(transcript.source)
+        self.translation_log.append(transcript.translation)
+
+        self._append_text(self.source_text_widget, transcript.source)
+        self._append_text(self.translation_text_widget, transcript.translation)
+
+    def _append_text(self, widget: tk.Text, text: str) -> None:
+        widget.configure(state=tk.NORMAL)
+        if widget.index("end-1c") != "1.0":
+            widget.insert(tk.END, "\n\n")
+        widget.insert(tk.END, text)
+        widget.see(tk.END)
+        widget.configure(state=tk.DISABLED)
 
 
 def main() -> None:
