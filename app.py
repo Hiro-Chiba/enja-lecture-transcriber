@@ -25,8 +25,14 @@ except Exception:  # pragma: no cover - optional dependency may not exist
 
 @dataclass
 class Transcript:
+    """認識・翻訳結果をUIで扱いやすい形に保持するデータクラス。"""
+
     source: str
     translation: str
+    accent_code: str
+    accent_label: str
+    confidence: float
+    timestamp: float
 
 
 class SpeechTranslatorApp:
@@ -36,6 +42,8 @@ class SpeechTranslatorApp:
 
         # UI components
         self.status_var = tk.StringVar(value="待機中")
+        self.accent_var = tk.StringVar(value="アクセント: -")
+        self.confidence_var = tk.StringVar(value="信頼度: -")
 
         self.source_log: list[str] = []
         self.translation_log: list[str] = []
@@ -80,53 +88,167 @@ class SpeechTranslatorApp:
         self.root.after(200, self._process_queue)
 
     def _build_ui(self) -> None:
-        padding = {"padx": 10, "pady": 5}
+        self.root.configure(bg="#0f172a")
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("Card.TLabelframe", background="#0f172a", foreground="#e2e8f0", padding=12)
+        style.configure("Card.TLabelframe.Label", background="#0f172a", foreground="#38bdf8", font=("Yu Gothic UI", 12, "bold"))
+        style.configure("Accent.TButton", font=("Yu Gothic UI", 12, "bold"), padding=10)
+        style.map(
+            "Accent.TButton",
+            background=[("!disabled", "#2563eb"), ("disabled", "#1e3a8a"), ("pressed", "#1d4ed8")],
+            foreground=[("!disabled", "#f8fafc"), ("disabled", "#94a3b8")],
+        )
+        style.configure("Danger.TButton", font=("Yu Gothic UI", 12, "bold"), padding=10)
+        style.map(
+            "Danger.TButton",
+            background=[("!disabled", "#e11d48"), ("disabled", "#7f1d1d"), ("pressed", "#be123c")],
+            foreground=[("!disabled", "#f8fafc"), ("disabled", "#fca5a5")],
+        )
 
-        status_frame = ttk.Frame(self.root)
+        padding = {"padx": 16, "pady": 8}
+
+        header = tk.Frame(self.root, bg="#0f172a")
+        header.pack(fill=tk.X, **padding)
+        title = tk.Label(
+            header,
+            text="英語→日本語 リアルタイム翻訳",
+            font=("Yu Gothic UI", 20, "bold"),
+            fg="#38bdf8",
+            bg="#0f172a",
+        )
+        title.pack(anchor=tk.W)
+        subtitle = tk.Label(
+            header,
+            text="話者のアクセントと翻訳を優雅に可視化します",
+            font=("Yu Gothic UI", 12),
+            fg="#94a3b8",
+            bg="#0f172a",
+        )
+        subtitle.pack(anchor=tk.W, pady=(4, 0))
+
+        status_frame = tk.Frame(self.root, bg="#0f172a")
         status_frame.pack(fill=tk.X, **padding)
-        ttk.Label(status_frame, text="状態:").pack(side=tk.LEFT)
-        ttk.Label(status_frame, textvariable=self.status_var).pack(side=tk.LEFT)
+        self.status_badge = tk.Label(
+            status_frame,
+            textvariable=self.status_var,
+            font=("Yu Gothic UI", 12, "bold"),
+            fg="#0f172a",
+            bg="#22c55e",
+            padx=12,
+            pady=6,
+            relief=tk.FLAT,
+            borderwidth=0,
+        )
+        self.status_badge.pack(side=tk.LEFT)
 
-        button_frame = ttk.Frame(self.root)
+        accent_info = tk.Frame(status_frame, bg="#0f172a")
+        accent_info.pack(side=tk.RIGHT)
+        accent_label = tk.Label(
+            accent_info,
+            textvariable=self.accent_var,
+            font=("Yu Gothic UI", 11, "bold"),
+            fg="#38bdf8",
+            bg="#0f172a",
+        )
+        accent_label.pack(side=tk.TOP, anchor=tk.E)
+        confidence_label = tk.Label(
+            accent_info,
+            textvariable=self.confidence_var,
+            font=("Yu Gothic UI", 10),
+            fg="#94a3b8",
+            bg="#0f172a",
+        )
+        confidence_label.pack(side=tk.TOP, anchor=tk.E)
+
+        button_frame = tk.Frame(self.root, bg="#0f172a")
         button_frame.pack(fill=tk.X, **padding)
-        self.start_button = ttk.Button(button_frame, text="開始", command=self.start_listening)
-        self.start_button.pack(side=tk.LEFT, padx=(0, 5))
-        self.stop_button = ttk.Button(button_frame, text="停止", command=self.stop_listening, state=tk.DISABLED)
+        self.start_button = ttk.Button(button_frame, text="開始", style="Accent.TButton", command=self.start_listening)
+        self.start_button.pack(side=tk.LEFT, padx=(0, 8))
+        self.stop_button = ttk.Button(
+            button_frame,
+            text="停止",
+            style="Danger.TButton",
+            command=self.stop_listening,
+            state=tk.DISABLED,
+        )
         self.stop_button.pack(side=tk.LEFT)
+        ttk.Button(button_frame, text="クリア", command=self.clear_logs).pack(side=tk.RIGHT)
 
-        source_frame = ttk.Labelframe(self.root, text="英語の認識結果")
+        helper_card = tk.Frame(self.root, bg="#1e293b", padx=16, pady=12)
+        helper_card.pack(fill=tk.X, **padding)
+        helper_title = tk.Label(
+            helper_card,
+            text="ヒント",
+            font=("Yu Gothic UI", 12, "bold"),
+            fg="#38bdf8",
+            bg="#1e293b",
+        )
+        helper_title.pack(anchor=tk.W)
+        helper_text = tk.Label(
+            helper_card,
+            text="静かな場所でご利用ください。停止→開始で再キャリブレーションできます。",
+            font=("Yu Gothic UI", 10),
+            fg="#cbd5f5",
+            bg="#1e293b",
+            wraplength=520,
+            justify=tk.LEFT,
+        )
+        helper_text.pack(anchor=tk.W, pady=(4, 0))
+
+        source_frame = ttk.Labelframe(self.root, text="英語の認識結果", style="Card.TLabelframe")
         source_frame.pack(fill=tk.BOTH, expand=True, **padding)
         self.source_text_widget = scrolledtext.ScrolledText(
             source_frame,
             wrap=tk.WORD,
-            height=10,
+            height=12,
             state=tk.DISABLED,
+            font=("Yu Gothic UI", 12),
+            bg="#020617",
+            fg="#e2e8f0",
+            insertbackground="#38bdf8",
+            relief=tk.FLAT,
         )
         self.source_text_widget.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        translation_frame = ttk.Labelframe(self.root, text="日本語訳")
+        translation_frame = ttk.Labelframe(self.root, text="日本語訳", style="Card.TLabelframe")
         translation_frame.pack(fill=tk.BOTH, expand=True, **padding)
         self.translation_text_widget = scrolledtext.ScrolledText(
             translation_frame,
             wrap=tk.WORD,
-            height=10,
+            height=12,
             state=tk.DISABLED,
+            font=("Yu Gothic UI", 12),
+            bg="#020617",
+            fg="#f1f5f9",
+            insertbackground="#38bdf8",
+            relief=tk.FLAT,
         )
         self.translation_text_widget.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        self.source_text_widget.tag_configure("timestamp", foreground="#38bdf8", font=("Yu Gothic UI", 10, "bold"))
+        self.source_text_widget.tag_configure("accent", foreground="#f97316", font=("Yu Gothic UI", 10, "bold"))
+        self.translation_text_widget.tag_configure("timestamp", foreground="#38bdf8", font=("Yu Gothic UI", 10, "bold"))
+        self.translation_text_widget.tag_configure("translation", foreground="#f8fafc", font=("Yu Gothic UI", 12))
+        self.translation_text_widget.tag_configure("divider", foreground="#1e293b")
+
+        self._update_status("待機中", color="#64748b")
 
     def start_listening(self) -> None:
         if self._running:
             return
+        self._update_status("マイクを準備中…", color="#fbbf24")
         try:
             with self.microphone as source:
                 self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
                 self._last_calibration = time.time()
         except OSError as exc:
             messagebox.showerror("マイクエラー", f"マイクにアクセスできません: {exc}")
+            self._update_status("マイクエラー", color="#ef4444")
             return
 
         self._running = True
-        self.status_var.set("リスニング中…")
+        self._update_status("リスニング中…", color="#22c55e")
         self.start_button.configure(state=tk.DISABLED)
         self.stop_button.configure(state=tk.NORMAL)
 
@@ -137,7 +259,7 @@ class SpeechTranslatorApp:
         if not self._running:
             return
         self._running = False
-        self.status_var.set("停止中…")
+        self._update_status("停止中…", color="#f97316")
         self.start_button.configure(state=tk.NORMAL)
         self.stop_button.configure(state=tk.DISABLED)
 
@@ -155,7 +277,7 @@ class SpeechTranslatorApp:
                     self._calibrate_noise()
                     continue
 
-                text = self._recognize_with_accents(audio)
+                text, accent_code, confidence = self._recognize_with_accents(audio)
                 if not text:
                     continue
 
@@ -163,7 +285,15 @@ class SpeechTranslatorApp:
                 if not translation:
                     continue
 
-                self._queue.put(Transcript(source=text, translation=translation))
+                transcript = Transcript(
+                    source=text,
+                    translation=translation,
+                    accent_code=accent_code,
+                    accent_label=self._format_accent(accent_code),
+                    confidence=confidence,
+                    timestamp=time.time(),
+                )
+                self._queue.put(transcript)
             except sr.UnknownValueError:
                 self._calibrate_noise(longer=True)
                 continue
@@ -180,19 +310,20 @@ class SpeechTranslatorApp:
                     self.stop_listening()
                     break
                 self._append_transcript(item)
-                self.status_var.set("翻訳しました")
+                self._update_status("翻訳しました", color="#22d3ee")
         except queue.Empty:
             pass
         finally:
             if self._running:
-                self.status_var.set("リスニング中…")
+                self._update_status("リスニング中…", color="#22c55e")
             self.root.after(200, self._process_queue)
 
-    def _recognize_with_accents(self, audio: sr.AudioData) -> str:
+    def _recognize_with_accents(self, audio: sr.AudioData) -> tuple[str, str, float]:
         """Try multiple English variants to better handle accented speech."""
         last_error: Exception | None = None
         best_confidence = -math.inf
         best_transcript = ""
+        best_language = ""
         for language_code in self.recognition_languages:
             try:
                 result = self.recognizer.recognize_google(
@@ -216,11 +347,13 @@ class SpeechTranslatorApp:
                             if confidence > best_confidence:
                                 best_confidence = confidence
                                 best_transcript = transcript
+                                best_language = language_code
             elif isinstance(result, str) and result:
-                return result.strip()
+                return result.strip(), language_code, 0.6
 
         if best_transcript:
-            return best_transcript
+            confidence = best_confidence if best_confidence > -math.inf else 0.6
+            return best_transcript, best_language or self.recognition_languages[0], confidence
 
         if last_error is not None:
             raise last_error
@@ -230,16 +363,50 @@ class SpeechTranslatorApp:
         self.source_log.append(transcript.source)
         self.translation_log.append(transcript.translation)
 
-        self._append_text(self.source_text_widget, transcript.source)
-        self._append_text(self.translation_text_widget, transcript.translation)
+        timestamp = time.strftime("%H:%M:%S", time.localtime(transcript.timestamp))
+        self._append_source_entry(timestamp, transcript)
+        self._append_translation_entry(timestamp, transcript.translation)
+        self.accent_var.set(f"アクセント: {transcript.accent_label}")
+        if transcript.confidence > 0:
+            self.confidence_var.set(f"信頼度: {transcript.confidence * 100:.1f}%")
+        else:
+            self.confidence_var.set("信頼度: -")
 
-    def _append_text(self, widget: tk.Text, text: str) -> None:
+    def _append_source_entry(self, timestamp: str, transcript: Transcript) -> None:
+        widget = self.source_text_widget
         widget.configure(state=tk.NORMAL)
         if widget.index("end-1c") != "1.0":
-            widget.insert(tk.END, "\n\n")
-        widget.insert(tk.END, text)
+            widget.insert(tk.END, "\n", ("divider",))
+        widget.insert(tk.END, f"{timestamp} ", ("timestamp",))
+        widget.insert(widget.index(tk.END), f"[{transcript.accent_label}]\n", ("accent",))
+        widget.insert(tk.END, transcript.source)
+        widget.insert(tk.END, "\n")
         widget.see(tk.END)
         widget.configure(state=tk.DISABLED)
+
+    def _append_translation_entry(self, timestamp: str, text: str) -> None:
+        widget = self.translation_text_widget
+        widget.configure(state=tk.NORMAL)
+        if widget.index("end-1c") != "1.0":
+            widget.insert(tk.END, "\n", ("divider",))
+        widget.insert(tk.END, f"{timestamp}\n", ("timestamp",))
+        widget.insert(tk.END, text, ("translation",))
+        widget.insert(tk.END, "\n")
+        widget.see(tk.END)
+        widget.configure(state=tk.DISABLED)
+
+    def clear_logs(self) -> None:
+        self.source_log.clear()
+        self.translation_log.clear()
+        self.source_text_widget.configure(state=tk.NORMAL)
+        self.source_text_widget.delete("1.0", tk.END)
+        self.source_text_widget.configure(state=tk.DISABLED)
+        self.translation_text_widget.configure(state=tk.NORMAL)
+        self.translation_text_widget.delete("1.0", tk.END)
+        self.translation_text_widget.configure(state=tk.DISABLED)
+        self.accent_var.set("アクセント: -")
+        self.confidence_var.set("信頼度: -")
+        self._update_status("履歴をクリアしました", color="#22d3ee")
 
     def _should_recalibrate(self, audio: sr.AudioData) -> bool:
         """Check whether the captured audio is too quiet or silent."""
@@ -345,6 +512,19 @@ class SpeechTranslatorApp:
 
         raw_audio = b"".join(voiced_frames)
         return sr.AudioData(raw_audio, sample_rate, sample_width)
+
+    def _update_status(self, text: str, color: str) -> None:
+        self.status_var.set(text)
+        self.status_badge.configure(bg=color)
+
+    def _format_accent(self, language_code: str) -> str:
+        mapping = {
+            "en-US": "アメリカ英語",
+            "en-GB": "イギリス英語", 
+            "en-IN": "インド英語",
+            "en-AU": "オーストラリア英語",
+        }
+        return mapping.get(language_code, f"{language_code} アクセント")
 
 
 class GoogleTranslateHelper:
