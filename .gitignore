@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+# Build/packaging
+dist/
+build/
+*.egg-info/
+# Editors/OS
+.vscode/
+.idea/
+.DS_Store
+# HF/Whisper キャッシュ（場所を変えてる場合は適宜追記）
+~/.cache/
+# 大容量モデルや音声ログはコミットしない
+models/
+recordings/
