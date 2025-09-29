@@ -2,3 +2,4 @@ speechrecognition
 pyaudio
 googletrans==4.0.0-rc1
 webrtcvad
+google-cloud-translate
