@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import collections
+import html
 import math
 import queue
 import re
@@ -10,10 +11,16 @@ import time
 import tkinter as tk
 from dataclasses import dataclass
 from tkinter import messagebox, scrolledtext, ttk
+from typing import Any
 
 import speech_recognition as sr
 from googletrans import Translator
 import webrtcvad
+
+try:  # Google Cloud Translation API (optional)
+    from google.cloud import translate_v2 as google_translate_v2
+except Exception:  # pragma: no cover - optional dependency may not exist
+    google_translate_v2 = None
 
 
 @dataclass
@@ -344,9 +351,19 @@ class GoogleTranslateHelper:
     """Google翻訳を活用した堅牢な翻訳ヘルパー。"""
 
     def __init__(self) -> None:
-        self._translator = Translator()
         self._lock = threading.Lock()
         self._cache: dict[str, str] = {}
+        self._official_client = self._create_official_client()
+        self._translator = Translator()
+
+    def _create_official_client(self) -> Any | None:
+        if google_translate_v2 is None:
+            return None
+
+        try:
+            return google_translate_v2.Client()
+        except Exception:
+            return None
 
     def translate(self, text: str, dest: str = "ja", src: str = "en") -> str:
         normalized = text.strip()
@@ -358,11 +375,41 @@ class GoogleTranslateHelper:
         if cached is not None:
             return cached
 
-        translation = self._translate_with_strategies(normalized, dest=dest, src=src)
+        translation = self._translate_official(normalized, dest=dest, src=src)
+        if not translation:
+            translation = self._translate_with_strategies(normalized, dest=dest, src=src)
+
         if translation:
             with self._lock:
                 self._cache[normalized] = translation
         return translation
+
+    def _translate_official(self, text: str, dest: str, src: str) -> str:
+        if self._official_client is None:
+            return ""
+
+        request: dict[str, Any] = {"target_language": dest, "format_": "text"}
+        if src != "auto":
+            request["source_language"] = src
+
+        try:
+            result = self._official_client.translate(text, **request)
+        except Exception:
+            return ""
+
+        if isinstance(result, list):
+            translations = [self._normalize_official(item.get("translatedText", "")) for item in result]
+            joined = "\n".join(filter(None, translations)).strip()
+            return joined
+
+        if isinstance(result, dict):
+            translated = self._normalize_official(result.get("translatedText", ""))
+            return translated
+
+        return ""
+
+    def _normalize_official(self, text: str) -> str:
+        return html.unescape(text.strip()) if text else ""
 
     def _translate_with_strategies(self, text: str, dest: str, src: str) -> str:
         strategies = (
