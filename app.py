@@ -1,6 +1,7 @@
 """Tkinter-based English speech-to-Japanese translation app."""
 from __future__ import annotations
 
+import math
 import queue
 import threading
 import time
@@ -41,6 +42,9 @@ class SpeechTranslatorApp:
         self.recognizer.energy_threshold = 300
         self.recognizer.pause_threshold = 0.6
         self.recognizer.non_speaking_duration = 0.3
+
+        # Runtime calibration
+        self._last_calibration = 0.0
 
         # Try multiple accent-specific language codes when recognizing speech
         self.recognition_languages = [
@@ -99,6 +103,7 @@ class SpeechTranslatorApp:
         try:
             with self.microphone as source:
                 self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                self._last_calibration = time.time()
         except OSError as exc:
             messagebox.showerror("マイクエラー", f"マイクにアクセスできません: {exc}")
             return
@@ -123,11 +128,29 @@ class SpeechTranslatorApp:
         while self._running:
             try:
                 with self.microphone as source:
-                    audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=6)
+                    audio = self.recognizer.listen(
+                        source,
+                        timeout=5,
+                        phrase_time_limit=6,
+                    )
+
+                if self._should_recalibrate(audio):
+                    self._calibrate_noise()
+                    continue
+
                 text = self._recognize_with_accents(audio)
+                if not text:
+                    continue
+
                 translation = self.translator.translate(text, src="en", dest="ja").text
+                if not translation:
+                    continue
+
                 self._queue.put(Transcript(source=text, translation=translation))
             except sr.WaitTimeoutError:
+                continue
+            except sr.UnknownValueError:
+                self._calibrate_noise(longer=True)
                 continue
             except Exception as exc:  # pylint: disable=broad-except
                 self._queue.put(exc)
@@ -153,6 +176,8 @@ class SpeechTranslatorApp:
     def _recognize_with_accents(self, audio: sr.AudioData) -> str:
         """Try multiple English variants to better handle accented speech."""
         last_error: Exception | None = None
+        best_confidence = -math.inf
+        best_transcript = ""
         for language_code in self.recognition_languages:
             try:
                 result = self.recognizer.recognize_google(
@@ -167,15 +192,20 @@ class SpeechTranslatorApp:
             if isinstance(result, dict):
                 alternatives = result.get("alternative", [])
                 if alternatives:
-                    best_match = max(
-                        alternatives,
-                        key=lambda alt: alt.get("confidence", 0.0),
-                    )
-                    transcript = best_match.get("transcript")
-                    if transcript:
-                        return transcript
+                    for alternative in alternatives:
+                        transcript = alternative.get("transcript", "").strip()
+                        confidence = alternative.get("confidence")
+                        if transcript:
+                            if confidence is None:
+                                confidence = 0.6  # assume reasonable default
+                            if confidence > best_confidence:
+                                best_confidence = confidence
+                                best_transcript = transcript
             elif isinstance(result, str) and result:
-                return result
+                return result.strip()
+
+        if best_transcript:
+            return best_transcript
 
         if last_error is not None:
             raise last_error
@@ -195,6 +225,44 @@ class SpeechTranslatorApp:
         widget.insert(tk.END, text)
         widget.see(tk.END)
         widget.configure(state=tk.DISABLED)
+
+    def _should_recalibrate(self, audio: sr.AudioData) -> bool:
+        """Check whether the captured audio is too quiet or silent."""
+        rms = self._calculate_rms(audio)
+        if rms < 50:  # empirically chosen threshold for low-volume audio
+            return True
+        return False
+
+    def _calculate_rms(self, audio: sr.AudioData) -> float:
+        raw = audio.get_raw_data(convert_rate=16000, convert_width=2)
+        if not raw:
+            return 0.0
+
+        sample_count = len(raw) // 2
+        if sample_count == 0:
+            return 0.0
+
+        sum_squares = 0.0
+        for i in range(0, len(raw), 2):
+            sample = int.from_bytes(raw[i : i + 2], byteorder="little", signed=True)
+            sum_squares += sample * sample
+
+        return math.sqrt(sum_squares / sample_count)
+
+    def _calibrate_noise(self, longer: bool = False) -> None:
+        """Re-calibrate ambient noise levels to avoid recognition errors."""
+        # Limit calibration frequency to avoid blocking the UI.
+        now = time.time()
+        if now - self._last_calibration < 5:
+            return
+
+        duration = 1.5 if longer else 0.8
+        try:
+            with self.microphone as source:
+                self.recognizer.adjust_for_ambient_noise(source, duration=duration)
+        except OSError:
+            return
+        self._last_calibration = now
 
 
 def main() -> None:
