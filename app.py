@@ -4,6 +4,7 @@ from __future__ import annotations
 import collections
 import math
 import queue
+import re
 import threading
 import time
 import tkinter as tk
@@ -37,7 +38,7 @@ class SpeechTranslatorApp:
         # Speech/translation backend
         self.recognizer = sr.Recognizer()
         self.microphone = sr.Microphone(sample_rate=16000, chunk_size=480)
-        self.translator = Translator()
+        self.translation_helper = GoogleTranslateHelper()
 
         # Fine-tune recognizer for better accuracy
         self.recognizer.dynamic_energy_threshold = True
@@ -151,7 +152,7 @@ class SpeechTranslatorApp:
                 if not text:
                     continue
 
-                translation = self.translator.translate(text, src="en", dest="ja").text
+                translation = self.translation_helper.translate(text)
                 if not translation:
                     continue
 
@@ -337,6 +338,82 @@ class SpeechTranslatorApp:
 
         raw_audio = b"".join(voiced_frames)
         return sr.AudioData(raw_audio, sample_rate, sample_width)
+
+
+class GoogleTranslateHelper:
+    """Google翻訳を活用した堅牢な翻訳ヘルパー。"""
+
+    def __init__(self) -> None:
+        self._translator = Translator()
+        self._lock = threading.Lock()
+        self._cache: dict[str, str] = {}
+
+    def translate(self, text: str, dest: str = "ja", src: str = "en") -> str:
+        normalized = text.strip()
+        if not normalized:
+            return ""
+
+        with self._lock:
+            cached = self._cache.get(normalized)
+        if cached is not None:
+            return cached
+
+        translation = self._translate_with_strategies(normalized, dest=dest, src=src)
+        if translation:
+            with self._lock:
+                self._cache[normalized] = translation
+        return translation
+
+    def _translate_with_strategies(self, text: str, dest: str, src: str) -> str:
+        strategies = (
+            {"src": src, "dest": dest},
+            {"src": "auto", "dest": dest},
+        )
+
+        last_error: Exception | None = None
+        for strategy in strategies:
+            try:
+                result = self._translator.translate(text, **strategy)
+            except Exception as exc:  # pylint: disable=broad-except
+                last_error = exc
+                continue
+
+            translated = result.text.strip()
+            if translated:
+                return translated
+
+        segmented_translation = self._translate_segmented(text, dest=dest, src=src)
+        if segmented_translation:
+            return segmented_translation
+
+        if last_error is not None:
+            raise last_error
+        return ""
+
+    def _translate_segmented(self, text: str, dest: str, src: str) -> str:
+        sentences = self._split_sentences(text)
+        if len(sentences) <= 1:
+            return ""
+
+        translated_sentences: list[str] = []
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            try:
+                result = self._translator.translate(sentence, src=src, dest=dest)
+            except Exception:  # pylint: disable=broad-except
+                continue
+            translated = result.text.strip()
+            if translated:
+                translated_sentences.append(translated)
+
+        return "\n".join(translated_sentences).strip()
+
+    @staticmethod
+    def _split_sentences(text: str) -> list[str]:
+        parts = re.split(r"(?<=[.!?])\s+|\n+", text)
+        return [part for part in parts if part]
 
 
 def main() -> None:
