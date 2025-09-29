@@ -1,6 +1,7 @@
 """Tkinter-based English speech-to-Japanese translation app."""
 from __future__ import annotations
 
+import collections
 import math
 import queue
 import threading
@@ -11,6 +12,7 @@ from tkinter import messagebox, scrolledtext, ttk
 
 import speech_recognition as sr
 from googletrans import Translator
+import webrtcvad
 
 
 @dataclass
@@ -34,7 +36,7 @@ class SpeechTranslatorApp:
 
         # Speech/translation backend
         self.recognizer = sr.Recognizer()
-        self.microphone = sr.Microphone()
+        self.microphone = sr.Microphone(sample_rate=16000, chunk_size=480)
         self.translator = Translator()
 
         # Fine-tune recognizer for better accuracy
@@ -45,6 +47,13 @@ class SpeechTranslatorApp:
 
         # Runtime calibration
         self._last_calibration = 0.0
+
+        # Voice activity detection parameters for precise segmentation
+        self.vad = webrtcvad.Vad(2)
+        self._frame_duration_ms = 30
+        self._padding_duration_ms = 300
+        self._max_segment_ms = 9000
+        self._max_initial_silence_ms = 2000
 
         # Try multiple accent-specific language codes when recognizing speech
         self.recognition_languages = [
@@ -128,11 +137,11 @@ class SpeechTranslatorApp:
         while self._running:
             try:
                 with self.microphone as source:
-                    audio = self.recognizer.listen(
-                        source,
-                        timeout=5,
-                        phrase_time_limit=6,
-                    )
+                    audio = self._record_segment(source)
+
+                if audio is None:
+                    time.sleep(0.05)
+                    continue
 
                 if self._should_recalibrate(audio):
                     self._calibrate_noise()
@@ -147,8 +156,6 @@ class SpeechTranslatorApp:
                     continue
 
                 self._queue.put(Transcript(source=text, translation=translation))
-            except sr.WaitTimeoutError:
-                continue
             except sr.UnknownValueError:
                 self._calibrate_noise(longer=True)
                 continue
@@ -263,6 +270,73 @@ class SpeechTranslatorApp:
         except OSError:
             return
         self._last_calibration = now
+
+    def _record_segment(self, source: sr.AudioSource) -> sr.AudioData | None:
+        """Capture a speech segment using WebRTC VAD for robust chunking."""
+        sample_rate = source.SAMPLE_RATE or self.microphone.SAMPLE_RATE
+        sample_width = source.SAMPLE_WIDTH or self.microphone.SAMPLE_WIDTH
+        if not sample_rate or not sample_width:
+            return None
+
+        frame_length = int(sample_rate * self._frame_duration_ms / 1000)
+        if frame_length <= 0:
+            return None
+
+        padding_frames = max(1, self._padding_duration_ms // self._frame_duration_ms)
+        max_silence_frames = max(1, self._max_initial_silence_ms // self._frame_duration_ms)
+        max_segment_frames = max(1, self._max_segment_ms // self._frame_duration_ms)
+
+        ring_buffer: "collections.deque[tuple[bytes, bool]]" = collections.deque(maxlen=padding_frames)
+        voiced_frames: list[bytes] = []
+        triggered = False
+        initial_silence_frames = 0
+
+        while self._running:
+            try:
+                frame = source.stream.read(frame_length, exception_on_overflow=False)
+            except OSError:
+                return None
+
+            if len(frame) < frame_length * sample_width:
+                continue
+
+            try:
+                is_speech = self.vad.is_speech(frame, sample_rate)
+            except ValueError:
+                continue
+
+            if not triggered:
+                ring_buffer.append((frame, is_speech))
+                if is_speech:
+                    initial_silence_frames = 0
+                else:
+                    initial_silence_frames += 1
+
+                num_voiced = sum(1 for _, speech in ring_buffer if speech)
+                if len(ring_buffer) == ring_buffer.maxlen and num_voiced > 0.9 * ring_buffer.maxlen:
+                    triggered = True
+                    voiced_frames.extend(f for f, _ in ring_buffer)
+                    ring_buffer.clear()
+                    continue
+
+                if initial_silence_frames >= max_silence_frames:
+                    return None
+            else:
+                voiced_frames.append(frame)
+                ring_buffer.append((frame, is_speech))
+
+                num_unvoiced = sum(1 for _, speech in ring_buffer if not speech)
+                if (
+                    (len(ring_buffer) == ring_buffer.maxlen and num_unvoiced > 0.85 * ring_buffer.maxlen)
+                    or len(voiced_frames) >= max_segment_frames
+                ):
+                    break
+
+        if not voiced_frames:
+            return None
+
+        raw_audio = b"".join(voiced_frames)
+        return sr.AudioData(raw_audio, sample_rate, sample_width)
 
 
 def main() -> None:
