@@ -1,4 +1,4 @@
-"""Tkinterを用いた英語音声の日本語翻訳アプリ。"""
+"""Tkinter製の英語音声→日本語翻訳アプリ。"""
 from __future__ import annotations
 
 import collections
@@ -23,9 +23,19 @@ except Exception:  # pragma: no cover - 任意依存関係が存在しない場�
     google_translate_v2 = None
 
 
+ACCENT_LABELS = {
+    "en-US": "アメリカ英語",
+    "en-GB": "イギリス英語",
+    "en-IN": "インド英語",
+    "en-AU": "オーストラリア英語",
+}
+
+DEFAULT_RECOGNITION_LANGUAGES = list(ACCENT_LABELS)
+
+
 @dataclass
 class Transcript:
-    """認識・翻訳結果をUIで扱いやすい形に保持するデータクラス。"""
+    """UIで扱いやすい認識・翻訳結果。"""
 
     source: str
     translation: str
@@ -40,7 +50,6 @@ class SpeechTranslatorApp:
         self.root = root
         self.root.title("英語→日本語 リアルタイム翻訳")
 
-        # UI部品
         self.status_var = tk.StringVar(value="待機中")
         self.accent_var = tk.StringVar(value="アクセント: -")
         self.confidence_var = tk.StringVar(value="信頼度: -")
@@ -49,43 +58,33 @@ class SpeechTranslatorApp:
         self.translation_log: list[str] = []
 
         self._build_ui()
+        self._configure_recognizer()
+        self._configure_vad()
 
-        # 音声認識と翻訳のバックエンド
+        self.translation_helper = GoogleTranslateHelper()
+        self.recognition_languages = list(DEFAULT_RECOGNITION_LANGUAGES)
+
+        self._queue: "queue.Queue[Transcript | Exception]" = queue.Queue()
+        self._worker: threading.Thread | None = None
+        self._running = False
+        self._last_calibration = 0.0
+
+        self.root.after(200, self._process_queue)
+
+    def _configure_recognizer(self) -> None:
         self.recognizer = sr.Recognizer()
         self.microphone = sr.Microphone(sample_rate=16000, chunk_size=480)
-        self.translation_helper = GoogleTranslateHelper()
-
-        # 認識精度を高めるための調整
         self.recognizer.dynamic_energy_threshold = True
         self.recognizer.energy_threshold = 300
         self.recognizer.pause_threshold = 0.6
         self.recognizer.non_speaking_duration = 0.3
 
-        # 実行時キャリブレーション
-        self._last_calibration = 0.0
-
-        # 音声区間を正確に検出するためのパラメータ
+    def _configure_vad(self) -> None:
         self.vad = webrtcvad.Vad(2)
         self._frame_duration_ms = 30
         self._padding_duration_ms = 300
         self._max_segment_ms = 9000
         self._max_initial_silence_ms = 2000
-
-        # アクセント別の言語コードを順番に試す
-        self.recognition_languages = [
-            "en-US",
-            "en-GB",
-            "en-IN",
-            "en-AU",
-        ]
-
-        # スレッド関連
-        self._queue: "queue.Queue[Transcript | Exception]" = queue.Queue()
-        self._worker: threading.Thread | None = None
-        self._running = False
-
-        # UIを定期的に更新
-        self.root.after(200, self._process_queue)
 
     def _build_ui(self) -> None:
         self.root.update_idletasks()
@@ -128,11 +127,11 @@ class SpeechTranslatorApp:
         clear_button = tk.Button(button_frame, text="クリア", command=self.clear_logs)
         clear_button.pack(side=tk.RIGHT)
 
-        helper_card = tk.LabelFrame(main_frame, text="使い方のコツ")
+        helper_card = tk.LabelFrame(main_frame, text="使い方")
         helper_card.pack(fill=tk.X, pady=(0, 12))
         helper_text = tk.Label(
             helper_card,
-            text="静かな場所でご利用ください。翻訳が止まった場合は停止→開始で調整できます。",
+            text="静かな場所で利用し、止まったら停止→開始で立て直せます。",
             justify=tk.LEFT,
             wraplength=max(default_width - 80, 200),
         )
@@ -180,8 +179,7 @@ class SpeechTranslatorApp:
 
         self._running = True
         self._update_status("リスニング中…")
-        self.start_button.configure(state=tk.DISABLED)
-        self.stop_button.configure(state=tk.NORMAL)
+        self._set_controls_running(True)
 
         self._worker = threading.Thread(target=self._listen_loop, daemon=True)
         self._worker.start()
@@ -191,8 +189,11 @@ class SpeechTranslatorApp:
             return
         self._running = False
         self._update_status("停止中…")
-        self.start_button.configure(state=tk.NORMAL)
-        self.stop_button.configure(state=tk.DISABLED)
+        self._set_controls_running(False)
+
+    def _set_controls_running(self, running: bool) -> None:
+        self.start_button.configure(state=tk.DISABLED if running else tk.NORMAL)
+        self.stop_button.configure(state=tk.NORMAL if running else tk.DISABLED)
 
     def _listen_loop(self) -> None:
         while self._running:
@@ -341,10 +342,7 @@ class SpeechTranslatorApp:
 
     def _should_recalibrate(self, audio: sr.AudioData) -> bool:
         """取得した音声が小さすぎるか無音かを確認する。"""
-        rms = self._calculate_rms(audio)
-        if rms < 50:  # 小さな音量を判定するための経験的なしきい値
-            return True
-        return False
+        return self._calculate_rms(audio) < 50  # 小さな音量を判定する経験的なしきい値
 
     def _calculate_rms(self, audio: sr.AudioData) -> float:
         raw = audio.get_raw_data(convert_rate=16000, convert_width=2)
@@ -452,17 +450,11 @@ class SpeechTranslatorApp:
             self.status_label.configure(bg=self._default_status_bg)
 
     def _format_accent(self, language_code: str) -> str:
-        mapping = {
-            "en-US": "アメリカ英語",
-            "en-GB": "イギリス英語", 
-            "en-IN": "インド英語",
-            "en-AU": "オーストラリア英語",
-        }
-        return mapping.get(language_code, f"{language_code} アクセント")
+        return ACCENT_LABELS.get(language_code, f"{language_code} アクセント")
 
 
 class GoogleTranslateHelper:
-    """Google翻訳を活用した堅牢な翻訳ヘルパー。"""
+    """公式APIとgoogletransをまとめた翻訳ヘルパー。"""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
